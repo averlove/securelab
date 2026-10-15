@@ -23,6 +23,26 @@ builder.Services.AddScoped<IncidentQueries>();
 var app = builder.Build();
 
 var resetRequested = args.Contains("--reset-database", StringComparer.Ordinal);
+
+if (resetRequested)
+{
+    var connString = builder.Configuration.GetConnectionString("SecureLab")
+        ?? builder.Configuration["ConnectionStrings:SecureLab"];
+
+    var csb = new Npgsql.NpgsqlConnectionStringBuilder(connString);
+    var host = csb.Host;
+
+    bool isLocalHost = string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(host, "::1", StringComparison.OrdinalIgnoreCase);
+
+    if (!isLocalHost)
+    {
+        Console.Error.WriteLine($"Помилка: Скидання бази даних (--reset-database) дозволено лише для локальних хостів (127.0.0.1, localhost, ::1). Вказаний хост: '{host}'.");
+        return;
+    }
+}
+
 await DatabaseBootstrap.InitializeAsync(app.Services, app.Configuration, app.Environment, resetRequested);
 
 if (resetRequested)
