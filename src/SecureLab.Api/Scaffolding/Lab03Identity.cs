@@ -1,8 +1,24 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Identity;
 using SecureLab.Api.Data;
 using SecureLab.Api.Data.Entities;
 
 namespace SecureLab.Api.Scaffolding;
+
+public record RegisterRequest(
+    string UserName,
+    string Email,
+    string DisplayName,
+    string Password);
+
+public record RegisterResponse(
+    Guid Id,
+    string UserName,
+    string DisplayName);
+
+public record LoginRequest(
+    string UserName,
+    string Password);
 
 public static class Lab03Identity
 {
@@ -13,18 +29,22 @@ public static class Lab03Identity
             options.User.RequireUniqueEmail = true;
             options.Password.RequiredLength = 10;
         }).AddEntityFrameworkStores<SecureLabDbContext>().AddDefaultTokenProviders();
+
         builder.Services.AddAuthorization();
+
         builder.Services.ConfigureApplicationCookie(options =>
         {
             options.Cookie.HttpOnly = true;
             options.Cookie.SameSite = SameSiteMode.Lax;
             options.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
                 ? CookieSecurePolicy.SameAsRequest : CookieSecurePolicy.Always;
+
             options.Events.OnRedirectToLogin = context =>
             {
                 context.Response.StatusCode = StatusCodes.Status401Unauthorized;
                 return Task.CompletedTask;
             };
+
             options.Events.OnRedirectToAccessDenied = context =>
             {
                 context.Response.StatusCode = StatusCodes.Status403Forbidden;
@@ -35,43 +55,95 @@ public static class Lab03Identity
 
     public static void MapLab03Identity(this WebApplication app)
     {
-        app.MapPost("/api/auth/register", async (RegistrationInput input, UserManager<ApplicationUser> users) =>
+        // 1. POST /api/auth/register
+        app.MapPost("/api/auth/register", async (RegisterRequest input, UserManager<ApplicationUser> userManager) =>
         {
-            // ЛР 03: завершіть DTO validation та перевірки довірчої межі.
-            if (string.IsNullOrWhiteSpace(input.UserName) || string.IsNullOrWhiteSpace(input.Email)
-                || string.IsNullOrWhiteSpace(input.DisplayName) || string.IsNullOrEmpty(input.Password))
-                return Results.BadRequest();
+            if (string.IsNullOrWhiteSpace(input.UserName) ||
+                string.IsNullOrWhiteSpace(input.Email) ||
+                string.IsNullOrWhiteSpace(input.DisplayName) ||
+                string.IsNullOrWhiteSpace(input.Password))
+            {
+                return Results.BadRequest(new { message = "Усі поля є обов'язковими." });
+            }
+
+            if (input.DisplayName.Trim().Length > 120)
+            {
+                return Results.BadRequest(new { message = "DisplayName не може перевищувати 120 символів." });
+            }
+
             var user = new ApplicationUser
             {
-                Id = Guid.NewGuid(), UserName = input.UserName.Trim(), Email = input.Email.Trim(),
+                Id = Guid.NewGuid(),
+                UserName = input.UserName.Trim(),
+                Email = input.Email.Trim(),
                 DisplayName = input.DisplayName.Trim()
             };
-            var result = await users.CreateAsync(user, input.Password);
-            if (!result.Succeeded) return Results.BadRequest(new { message = "Registration failed" });
-            var role = await users.AddToRoleAsync(user, DbSeeder.ReporterRole);
-            if (!role.Succeeded) throw new InvalidOperationException("Default role assignment failed.");
-            return Results.Created("/api/me", new { user.Id, user.UserName, user.DisplayName });
+
+            var result = await userManager.CreateAsync(user, input.Password);
+            if (!result.Succeeded)
+            {
+                var errorCodes = result.Errors.Select(e => e.Code).ToArray();
+
+                if (errorCodes.Contains("DuplicateUserName") || errorCodes.Contains("DuplicateEmail"))
+                {
+                    return Results.Conflict(new { message = "Користувач з таким іменем або email вже існує.", errors = errorCodes });
+                }
+
+                return Results.BadRequest(new { message = "Реєстрація не відповідає вимогам пароля або формату.", errors = errorCodes });
+            }
+
+            var roleResult = await userManager.AddToRoleAsync(user, DbSeeder.ReporterRole);
+            if (!roleResult.Succeeded)
+            {
+                throw new InvalidOperationException("Default role assignment failed.");
+            }
+
+            var responseDto = new RegisterResponse(user.Id, user.UserName ?? string.Empty, user.DisplayName);
+            return Results.Created("/api/me", responseDto);
         });
-        app.MapPost("/api/auth/login", async (LoginInput input, SignInManager<ApplicationUser> signIn) =>
+
+        // 2. POST /api/auth/login
+        app.MapPost("/api/auth/login", async (LoginRequest input, SignInManager<ApplicationUser> signIn) =>
         {
             if (string.IsNullOrWhiteSpace(input.UserName) || string.IsNullOrEmpty(input.Password))
+            {
                 return Results.Unauthorized();
-            var result = await signIn.PasswordSignInAsync(input.UserName, input.Password, false, false);
+            }
+
+            var result = await signIn.PasswordSignInAsync(input.UserName, input.Password, isPersistent: false, lockoutOnFailure: false);
             return result.Succeeded ? Results.NoContent() : Results.Unauthorized();
         });
-        app.MapPost("/api/auth/logout", () => Results.StatusCode(StatusCodes.Status501NotImplemented));
-        // Навмисно хибна навчальна довіра: ЛР 03 замінює заявлений id на verified principal.
-        app.MapGet("/api/me", async (HttpContext context, SecureLabDbContext db) =>
+
+        // 3. POST /api/auth/logout
+        app.MapPost("/api/auth/logout", async (SignInManager<ApplicationUser> signIn) =>
         {
-            if (!Guid.TryParse(context.Request.Headers["X-Demo-UserId"], out var claimedId))
-                return Results.StatusCode(StatusCodes.Status501NotImplemented);
-            var user = await db.Users.FindAsync(claimedId);
-            return user is null ? Results.NotFound() : Results.Ok(new { user.Id, user.UserName, user.DisplayName });
-        });
-        // Приклад лише mechanics: не повертає identity і не реалізує оцінювану operation.
+            await signIn.SignOutAsync();
+            return Results.NoContent();
+        }).RequireAuthorization();
+
+        // 4. GET /api/me (Verified Principal)
+        app.MapGet("/api/me", GetCurrentUser).RequireAuthorization();
+
+        // 5. GET /api/auth/session-check
         app.MapGet("/api/auth/session-check", () => Results.NoContent()).RequireAuthorization();
     }
-}
 
-public sealed record RegistrationInput(string? UserName, string? Email, string? DisplayName, string? Password);
-public sealed record LoginInput(string? UserName, string? Password);
+    private static IResult GetCurrentUser(HttpContext httpContext)
+    {
+        var userIdStr = httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        if (!Guid.TryParse(userIdStr, out var verifiedUserId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var userName = httpContext.User.FindFirst(ClaimTypes.Name)?.Value ?? string.Empty;
+        var role = httpContext.User.FindFirst(ClaimTypes.Role)?.Value ?? string.Empty;
+
+        return Results.Ok(new
+        {
+            userId = verifiedUserId,
+            userName = userName,
+            role = role
+        });
+    }
+}
