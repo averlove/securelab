@@ -28,3 +28,17 @@ Accept: application/json
 ### Lab 1 extension point: expected 501 before student implementation
 GET {{host}}/api/incidents/severity-summary
 Accept: application/json
+
+@host = http://localhost:5080
+@aliceId = 20000000-0000-0000-0000-000000000001
+@bobId = 20000000-0000-0000-0000-000000000002
+
+### Alice login
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{ "userName": "alice", "password": "{{$processEnv SeedUsers_Password}}" }
+
+### Foreign details with the same Alice cookie
+GET {{host}}/api/incidents/{{bobId}}
+Accept: application/json
