@@ -1,4 +1,7 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authorization;
 using SecureLab.Api.Application.Incidents;
+using SecureLab.Api.Data;
 using SecureLab.Api.Data.Entities;
 using SecureLab.Api.Presentation.Contracts;
 
@@ -9,7 +12,8 @@ public static class IncidentEndpoints
     public static IEndpointRouteBuilder MapIncidentEndpoints(this IEndpointRouteBuilder endpoints)
     {
         var group = endpoints.MapGroup("/api/incidents")
-            .WithTags("Incidents");
+            .WithTags("Incidents")
+            .RequireAuthorization(); // Вимога ЛР 04: Всі ендпоінти інцидентів вимагають авторизації
 
         group.MapGet("/", GetListAsync)
             .WithName("GetIncidents")
@@ -34,8 +38,17 @@ public static class IncidentEndpoints
     private static async Task<IResult> GetListAsync(
         string? status,
         IncidentQueries queries,
+        HttpContext httpContext,
         CancellationToken cancellationToken)
     {
+        var userIdStr = httpContext.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdStr, out var userId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var isAnalyst = httpContext.User.IsInRole(DbSeeder.AnalystRole);
+
         IncidentStatus? parsedStatus = null;
         if (status is not null)
         {
@@ -51,20 +64,51 @@ public static class IncidentEndpoints
             parsedStatus = candidate;
         }
 
-        return Results.Ok(await queries.GetListAsync(parsedStatus, cancellationToken));
+        var items = await queries.GetListAsync(parsedStatus, userId, isAnalyst, cancellationToken);
+        return Results.Ok(items);
     }
 
     private static async Task<IResult> GetDetailsAsync(
         Guid id,
         IncidentQueries queries,
+        HttpContext httpContext,
+        IAuthorizationService authorizationService,
         CancellationToken cancellationToken)
     {
-        var incident = await queries.GetDetailsAsync(id, cancellationToken);
-        return incident is null
-            ? Results.Problem(
-                title: "Інцидент не знайдено",
-                detail: $"Інцидент '{id}' не існує.",
-                statusCode: StatusCodes.Status404NotFound)
-            : Results.Ok(incident);
+        var userIdStr = httpContext.User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userIdStr, out var userId))
+        {
+            return Results.Unauthorized();
+        }
+
+        var isAnalyst = httpContext.User.IsInRole(DbSeeder.AnalystRole);
+
+        // 1. Завантажуємо базову сутність для перевірки через IncidentAuthorizationHandler
+        var incidentEntity = await queries.FindEntityByIdAsync(id, cancellationToken);
+        if (incidentEntity is null)
+        {
+            return IncidentNotFound(id);
+        }
+
+        // 2. Викликаємо централізований Handler
+        var decision = await authorizationService.AuthorizeAsync(
+            httpContext.User,
+            incidentEntity,
+            IncidentOperations.Read);
+
+        if (!decision.Succeeded)
+        {
+            // Політика 404: чужий інцидент виглядає для клієнта так само, як неіснуючий
+            return IncidentNotFound(id);
+        }
+
+        // 3. Якщо доступ дозволено — отримуємо повні деталі
+        var incident = await queries.GetDetailsAsync(id, userId, isAnalyst, cancellationToken);
+        return incident is null ? IncidentNotFound(id) : Results.Ok(incident);
     }
+
+    private static IResult IncidentNotFound(Guid id) => Results.Problem(
+        title: "Інцидент не знайдено",
+        detail: $"Інцидент '{id}' не існує.",
+        statusCode: StatusCodes.Status404NotFound);
 }
