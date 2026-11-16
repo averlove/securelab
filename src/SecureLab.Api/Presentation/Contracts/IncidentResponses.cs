@@ -24,3 +24,14 @@ public sealed record IncidentCommentResponse(
     string AuthorDisplayName,
     string Text,
     DateTimeOffset CreatedAtUtc);
+
+public sealed record CreateIncidentRequest(
+    string Title,
+    string Description,
+    string Severity,
+    DateTimeOffset OccurredAtUtc);
+
+public sealed record UpdateIncidentRequest(
+    string Title,
+    string Description,
+    string Severity);

@@ -8,5 +8,6 @@ public sealed class SecureLabApiFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Development");
+        builder.UseSetting("RateLimiting:GlobalPermitLimit", "1000");
     }
 }

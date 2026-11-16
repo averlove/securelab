@@ -5,16 +5,35 @@ using System.Security.Claims;
 
 namespace SecureLab.Api.Scaffolding;
 
-// Навчальний старт ЛР 02. Запускати лише з локальними штучними даними.
 public static class Lab02Endpoints
 {
     public static void MapLab02Endpoints(this WebApplication app)
     {
-        app.MapGet("/api/incidents/search", async (string? q, string? sortBy, SecureLabDbContext db, CancellationToken ct) =>
+        // =========================================================================
+        // GET /api/incidents/search (Захищено для ЛР 04 - Вимога А-11 "Відмінно")
+        // =========================================================================
+        app.MapGet("/api/incidents/search", async (
+            string? q, 
+            string? sortBy, 
+            SecureLabDbContext db, 
+            ClaimsPrincipal userPrincipal, 
+            CancellationToken ct) =>
         {
+            // 1. Отримуємо ID авторизованого користувача
+            var userIdStr = userPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (!Guid.TryParse(userIdStr, out var verifiedUserId))
+            {
+                return Results.Unauthorized();
+            }
+
+            // 2. Перевіряємо, чи є користувач Аналітиком
+            var isAnalyst = userPrincipal.IsInRole(DbSeeder.AnalystRole);
+
             var pattern = "%" + EscapeLike(q ?? "") + "%";
 
+            // 3. A-11 Query Scoping: Аналітик бачить все, Reporter — тільки власні записи
             var query = db.Incidents.AsNoTracking()
+                .Where(x => isAnalyst || x.OwnerUserId == verifiedUserId)
                 .Where(x => EF.Functions.ILike(x.Title, pattern, "\\") 
                          || EF.Functions.ILike(x.Description, pattern, "\\"));
 
@@ -60,120 +79,122 @@ public static class Lab02Endpoints
                 .ToListAsync(ct);
 
             return Results.Ok(items);
-        });
+        }).RequireAuthorization(); // ЛР 04 (А-11): Додано захист від анонімного доступу
 
+        // =========================================================================
+        // POST /api/incidents (Успадковано з ЛР 03)
+        // =========================================================================
         app.MapPost("/api/incidents", async (
-    CreateIncidentRequest request, 
-    SecureLabDbContext db, 
-    ClaimsPrincipal userPrincipal, 
-    CancellationToken ct) =>
-{
-    // ЛР 03 (А-05): Отримуємо ідентифікатор авторизованого користувача з principal
-    var userIdStr = userPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-    if (!Guid.TryParse(userIdStr, out var verifiedUserId))
-    {
-        return Results.Unauthorized();
-    }
-
-    var now = DateTimeOffset.UtcNow;
-    var errors = new Dictionary<string, string[]>();
-
-    if (string.IsNullOrWhiteSpace(request.Title))
-    {
-        errors["title"] = ["Заголовок обов'язковий."];
-    }
-    else if (request.Title.Length > 160)
-    {
-        errors["title"] = ["Заголовок не повинен перевищувати 160 символів."];
-    }
-
-    if (string.IsNullOrWhiteSpace(request.Description))
-    {
-        errors["description"] = ["Опис обов'язковий."];
-    }
-    else if (request.Description.Length > 4000)
-    {
-        errors["description"] = ["Опис не повинен перевищувати 4000 символів."];
-    }
-
-    var severityIsValid = Enum.TryParse<IncidentSeverity>(request.Severity, true, out var severity) 
-                          && Enum.IsDefined(severity);
-    if (!severityIsValid)
-    {
-        errors["severity"] = ["Допустимі значення: Low, Medium, High, Critical."];
-    }
-
-    if (request.OccurredAtUtc is null)
-    {
-        errors["occurredAtUtc"] = ["Час виникнення обов'язковий."];
-    }
-    else if (request.OccurredAtUtc > now.AddMinutes(5))
-    {
-        errors["occurredAtUtc"] = ["Час виникнення не може бути в майбутньому."];
-    }
-
-    var normalizedTitle = request.Title?.Trim() ?? "";
-    var normalizedDescription = request.Description?.Trim() ?? "";
-
-    if (severityIsValid && (severity == IncidentSeverity.High || severity == IncidentSeverity.Critical))
-    {
-        if (!errors.ContainsKey("description") && normalizedDescription.Length < 40)
+            CreateIncidentRequest request, 
+            SecureLabDbContext db, 
+            ClaimsPrincipal userPrincipal, 
+            CancellationToken ct) =>
         {
-            errors["description"] = ["Для критичних інцидентів (High/Critical) опис має містити щонайменше 40 символів."];
-        }
-    }
+            var userIdStr = userPrincipal.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (!Guid.TryParse(userIdStr, out var verifiedUserId))
+            {
+                return Results.Unauthorized();
+            }
 
-    if (!errors.ContainsKey("description") && normalizedTitle.Length > 0 && 
-        string.Equals(normalizedTitle, normalizedDescription, StringComparison.OrdinalIgnoreCase))
-    {
-        errors["description"] = ["Опис не повинен повторювати заголовок інциденту."];
-    }
+            var now = DateTimeOffset.UtcNow;
+            var errors = new Dictionary<string, string[]>();
 
-    if (errors.Count > 0)
-    {
-        return Results.ValidationProblem(errors);
-    }
+            if (string.IsNullOrWhiteSpace(request.Title))
+            {
+                errors["title"] = ["Заголовок обов'язковий."];
+            }
+            else if (request.Title.Length > 160)
+            {
+                errors["title"] = ["Заголовок не повинен перевищувати 160 символів."];
+            }
 
-    var activeStatuses = new[] { IncidentStatus.New, IncidentStatus.Triaged, IncidentStatus.InProgress, IncidentStatus.Resolved };
-    var hasConflict = await db.Incidents.AnyAsync(x => 
-        x.Title == normalizedTitle && activeStatuses.Contains(x.Status), ct);
+            if (string.IsNullOrWhiteSpace(request.Description))
+            {
+                errors["description"] = ["Опис обов'язковий."];
+            }
+            else if (request.Description.Length > 4000)
+            {
+                errors["description"] = ["Опис не повинен перевищувати 4000 символів."];
+            }
 
-    if (hasConflict)
-    {
-        return Results.Problem(
-            statusCode: StatusCodes.Status409Conflict,
-            title: "Дублікат інциденту",
-            detail: "Активний інцидент із таким заголовком уже існує.");
-    }
+            var severityIsValid = Enum.TryParse<IncidentSeverity>(request.Severity, true, out var severity) 
+                                  && Enum.IsDefined(severity);
+            if (!severityIsValid)
+            {
+                errors["severity"] = ["Допустимі значення: Low, Medium, High, Critical."];
+            }
 
-    var incident = new Incident
-    {
-        Id = Guid.NewGuid(),
-        OwnerUserId = verifiedUserId, // ЛР 03: Власник встановлюється виключно з verified principal
-        Title = normalizedTitle,
-        Description = normalizedDescription,
-        Severity = severity,
-        Status = IncidentStatus.New,
-        OccurredAtUtc = request.OccurredAtUtc!.Value.ToUniversalTime(),
-        CreatedAtUtc = now,
-        UpdatedAtUtc = now
-    };
+            if (request.OccurredAtUtc is null)
+            {
+                errors["occurredAtUtc"] = ["Час виникнення обов'язковий."];
+            }
+            else if (request.OccurredAtUtc > now.AddMinutes(5))
+            {
+                errors["occurredAtUtc"] = ["Час виникнення не може бути в майбутньому."];
+            }
 
-    db.Incidents.Add(incident);
-    await db.SaveChangesAsync(ct);
+            var normalizedTitle = request.Title?.Trim() ?? "";
+            var normalizedDescription = request.Description?.Trim() ?? "";
 
-    var response = new CreatedIncidentResponse(
-        incident.Id,
-        incident.Title,
-        incident.Description,
-        incident.Severity.ToString(),
-        incident.Status.ToString(),
-        incident.OccurredAtUtc,
-        incident.CreatedAtUtc
-    );
+            if (severityIsValid && (severity == IncidentSeverity.High || severity == IncidentSeverity.Critical))
+            {
+                if (!errors.ContainsKey("description") && normalizedDescription.Length < 40)
+                {
+                    errors["description"] = ["Для критичних інцидентів (High/Critical) опис має містити щонайменше 40 символів."];
+                }
+            }
 
-    return Results.Created($"/api/incidents/{incident.Id}", response);
-}).RequireAuthorization(); // ЛР 03 (А-04): Обов'язкова авторизація
+            if (!errors.ContainsKey("description") && normalizedTitle.Length > 0 && 
+                string.Equals(normalizedTitle, normalizedDescription, StringComparison.OrdinalIgnoreCase))
+            {
+                errors["description"] = ["Опис не повинен повторювати заголовок інциденту."];
+            }
+
+            if (errors.Count > 0)
+            {
+                return Results.ValidationProblem(errors);
+            }
+
+            var activeStatuses = new[] { IncidentStatus.New, IncidentStatus.Triaged, IncidentStatus.InProgress, IncidentStatus.Resolved };
+            var hasConflict = await db.Incidents.AnyAsync(x => 
+                x.Title == normalizedTitle && activeStatuses.Contains(x.Status), ct);
+
+            if (hasConflict)
+            {
+                return Results.Problem(
+                    statusCode: StatusCodes.Status409Conflict,
+                    title: "Дублікат інциденту",
+                    detail: "Активний інцидент із таким заголовком уже існує.");
+            }
+
+            var incident = new Incident
+            {
+                Id = Guid.NewGuid(),
+                OwnerUserId = verifiedUserId,
+                Title = normalizedTitle,
+                Description = normalizedDescription,
+                Severity = severity,
+                Status = IncidentStatus.New,
+                OccurredAtUtc = request.OccurredAtUtc!.Value.ToUniversalTime(),
+                CreatedAtUtc = now,
+                UpdatedAtUtc = now
+            };
+
+            db.Incidents.Add(incident);
+            await db.SaveChangesAsync(ct);
+
+            var response = new CreatedIncidentResponse(
+                incident.Id,
+                incident.Title,
+                incident.Description,
+                incident.Severity.ToString(),
+                incident.Status.ToString(),
+                incident.OccurredAtUtc,
+                incident.CreatedAtUtc
+            );
+
+            return Results.Created($"/api/incidents/{incident.Id}", response);
+        }).RequireAuthorization();
     }
 
     private static string EscapeLike(string value)

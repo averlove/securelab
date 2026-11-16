@@ -12,6 +12,7 @@ namespace SecureLab.Api.Application.Incidents;
 public static class IncidentOperations
 {
     public static readonly OperationAuthorizationRequirement Read = new() { Name = nameof(Read) };
+    public static readonly OperationAuthorizationRequirement Update = new() { Name = nameof(Update) };
     public static readonly OperationAuthorizationRequirement Triage = new() { Name = nameof(Triage) };
 }
 
@@ -33,12 +34,9 @@ public sealed class IncidentAuthorizationHandler : AuthorizationHandler<Operatio
         // 3. Логика матрицы доступа для конкретных действий
         bool allowed = requirement.Name switch
         {
-            // Просмотр деталей: разрешено владельцу ресурса ИЛИ Аналитику
             nameof(IncidentOperations.Read) => isOwner || isAnalyst,
-            
-            // Смена статуса (Triage): разрешено ТОЛЬКО Аналитику и ТОЛЬКО если статус "New"
+            nameof(IncidentOperations.Update) => isOwner || isAnalyst,
             nameof(IncidentOperations.Triage) => isAnalyst && incident.Status == IncidentStatus.New,
-            
             _ => false
         };
 

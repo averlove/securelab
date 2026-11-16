@@ -42,6 +42,22 @@ builder.Services.AddRateLimiter(options =>
             }));
 });
 
+var globalPermitLimit = builder.Configuration.GetValue("RateLimiting:GlobalPermitLimit", 5);
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+        RateLimitPartition.GetFixedWindowLimiter(
+            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "global",
+            factory: _ => new FixedWindowRateLimiterOptions
+            {
+                AutoReplenishment = true,
+                PermitLimit = globalPermitLimit,
+                Window = TimeSpan.FromSeconds(10)
+            }));
+});
+
 var app = builder.Build();
 
 var resetRequested = args.Contains("--reset-database", StringComparer.Ordinal);
