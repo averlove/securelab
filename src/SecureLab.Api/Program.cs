@@ -28,19 +28,19 @@ builder.Services.AddSingleton<IAuthorizationHandler, IncidentAuthorizationHandle
 
 builder.AddLab03Identity();
 
-builder.Services.AddRateLimiter(options =>
+if (builder.Environment.IsDevelopment())
 {
-    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
-    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
-        RateLimitPartition.GetFixedWindowLimiter(
-            partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "global",
-            factory: _ => new FixedWindowRateLimiterOptions
-            {
-                AutoReplenishment = true,
-                PermitLimit = 5, // Максимум 5 запитів
-                Window = TimeSpan.FromSeconds(10) // на 10 секунд
-            }));
-});
+    builder.Services.AddCors(options =>
+    {
+        options.AddPolicy("Lab05BrowserProbe", policy =>
+        {
+            policy.WithOrigins("http://localhost:4173")
+                  .WithMethods("GET")
+                  .WithHeaders("X-Lab-Cors-Probe")
+                  .AllowCredentials();
+        });
+    });
+}
 
 var globalPermitLimit = builder.Configuration.GetValue("RateLimiting:GlobalPermitLimit", 5);
 
@@ -71,14 +71,31 @@ if (resetRequested)
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 
+var csp = "default-src 'self'; frame-ancestors 'none'";
+
 app.Use(async (context, next) =>
 {
     context.Response.Headers.XContentTypeOptions = "nosniff";
-    context.Response.Headers.Append("Referrer-Policy", "no-referrer");
+    context.Response.Headers["Referrer-Policy"] = "no-referrer";
+
+    var isDevelopmentApiReference =
+        app.Environment.IsDevelopment()
+        && context.Request.Path.StartsWithSegments("/scalar");
+
+    if (!isDevelopmentApiReference)
+    {
+        context.Response.Headers["Content-Security-Policy"] = csp;
+    }
+
     await next(context);
 });
 
-app.UseRateLimiter();
+app.UseRouting();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseCors("Lab05BrowserProbe");
+}
 
 if (app.Environment.IsDevelopment())
 {
@@ -88,6 +105,7 @@ if (app.Environment.IsDevelopment())
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
