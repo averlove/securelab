@@ -29,6 +29,9 @@ public static class Lab03Identity
         {
             options.User.RequireUniqueEmail = true;
             options.Password.RequiredLength = 10;
+            options.Lockout.AllowedForNewUsers = true;
+            options.Lockout.MaxFailedAccessAttempts = 5;
+            options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(5);
         }).AddEntityFrameworkStores<SecureLabDbContext>().AddDefaultTokenProviders();
 
         builder.Services.AddAuthorization();
@@ -111,7 +114,7 @@ public static class Lab03Identity
                 return Results.Unauthorized();
             }
 
-            var result = await signIn.PasswordSignInAsync(input.UserName, input.Password, isPersistent: false, lockoutOnFailure: false);
+            var result = await signIn.PasswordSignInAsync(input.UserName, input.Password, isPersistent: false, lockoutOnFailure: true);
             return result.Succeeded ? Results.NoContent() : Results.Unauthorized();
         });
 

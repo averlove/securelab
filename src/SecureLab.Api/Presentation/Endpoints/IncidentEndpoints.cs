@@ -216,6 +216,13 @@ public static class IncidentEndpoints
         entity.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
 
+        var successAuditLogger = loggerFactory.CreateLogger("SecurityAudit");
+        successAuditLogger.LogInformation(
+            "SecurityAudit: Allowed privileged transition Triage on incident {IncidentId} for user {UserId} at {OccurredAtUtc}",
+            id,
+            userId,
+            entity.UpdatedAtUtc);
+
         return Results.NoContent();
     }
 

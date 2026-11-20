@@ -1,3 +1,5 @@
+using StackExchange.Redis;
+using SecureLab.Api.Security;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authorization;
@@ -49,6 +51,23 @@ if (builder.Environment.IsDevelopment())
 
 var globalPermitLimit = builder.Configuration.GetValue("RateLimiting:GlobalPermitLimit", 5);
 var searchPermitLimit = builder.Configuration.GetValue("RateLimiting:SearchPermitLimit", 10);
+
+var redisConnStr = builder.Configuration["Redis:ConnectionString"];
+IConnectionMultiplexer? redisMultiplexer = null;
+if (!string.IsNullOrWhiteSpace(redisConnStr))
+{
+    var cfg = ConfigurationOptions.Parse(redisConnStr);
+    cfg.AbortOnConnectFail = false;
+    cfg.ConnectTimeout = 1000;
+    cfg.SyncTimeout = 1000;
+    redisMultiplexer = ConnectionMultiplexer.Connect(cfg);
+}
+
+builder.Services.AddSingleton(sp => new RedisSearchRateLimiter(
+    redisMultiplexer,
+    sp.GetRequiredService<ILogger<RedisSearchRateLimiter>>(),
+    searchPermitLimit,
+    windowSeconds: 30));
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -128,6 +147,33 @@ if (app.Environment.IsDevelopment())
 
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.Use(async (context, next) =>
+{
+    if (HttpMethods.IsGet(context.Request.Method)
+        && context.Request.Path.Equals("/api/incidents", StringComparison.OrdinalIgnoreCase))
+    {
+        var redisLimiter = context.RequestServices.GetRequiredService<RedisSearchRateLimiter>();
+        if (redisLimiter.IsConfigured)
+        {
+            var partitionKey = context.User.Identity?.Name ?? "anonymous";
+            var decision = await redisLimiter.TryAcquireAsync(partitionKey);
+            if (decision == false)
+            {
+                context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+                context.Response.Headers.RetryAfter = "30";
+                await Results.Problem(
+                    title: "Too Many Requests",
+                    detail: "Distributed search rate limit exceeded.",
+                    statusCode: StatusCodes.Status429TooManyRequests).ExecuteAsync(context);
+                return;
+            }
+        }
+    }
+
+    await next(context);
+});
+
 app.UseRateLimiter();
 
 app.UseDefaultFiles();
