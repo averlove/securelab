@@ -1,3 +1,4 @@
+using SecureLab.Api.Security;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
@@ -27,12 +28,14 @@ public static class IncidentEndpoints
             .ProducesProblem(StatusCodes.Status404NotFound);
 
         group.MapPut("/{id:guid}", UpdateAsync)
+            .AddEndpointFilter<AntiforgeryFilter>()
             .WithName("UpdateIncident")
             .Produces(StatusCodes.Status204NoContent)
             .ProducesValidationProblem()
             .ProducesProblem(StatusCodes.Status404NotFound);
 
         group.MapPost("/{id:guid}/triage", TriageAsync)
+            .AddEndpointFilter<AntiforgeryFilter>()
             .WithName("TriageIncident")
             .Produces(StatusCodes.Status204NoContent)
             .ProducesProblem(StatusCodes.Status403Forbidden)
@@ -212,6 +215,13 @@ public static class IncidentEndpoints
         entity.Status = IncidentStatus.Triaged;
         entity.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
+
+        var successAuditLogger = loggerFactory.CreateLogger("SecurityAudit");
+        successAuditLogger.LogInformation(
+            "SecurityAudit: Allowed privileged transition Triage on incident {IncidentId} for user {UserId} at {OccurredAtUtc}",
+            id,
+            userId,
+            entity.UpdatedAtUtc);
 
         return Results.NoContent();
     }

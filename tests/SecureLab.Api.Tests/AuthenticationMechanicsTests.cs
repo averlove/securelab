@@ -48,4 +48,45 @@ public sealed class AuthenticationMechanicsTests(SecureLabApiFactory factory) : 
         });
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
+
+    // REG-AUTH-01: Repeated failed logins lock out account; another user remains unaffected
+    [Fact]
+    public async Task Login_RepeatedFailures_LocksOutAccount_WithoutAffectingOtherUsers()
+    {
+        var password = Environment.GetEnvironmentVariable("SeedUsers__Password")
+            ?? throw new InvalidOperationException("Set local SeedUsers__Password outside Git.");
+
+        using var client = factory.CreateClient();
+
+        var targetUser = $"lockout_probe_{Guid.NewGuid():N}";
+        using var regResp = await client.PostAsJsonAsync("/api/auth/register", new
+        {
+            UserName = targetUser,
+            Email = $"{targetUser}@example.test",
+            DisplayName = "Lockout Probe",
+            Password = password
+        });
+        Assert.Equal(HttpStatusCode.Created, regResp.StatusCode);
+
+        for (var i = 0; i < 5; i++)
+        {
+            using var failResp = await client.PostAsJsonAsync("/api/auth/login", new
+            {
+                UserName = targetUser,
+                Password = "WrongPassword123!"
+            });
+            Assert.Equal(HttpStatusCode.Unauthorized, failResp.StatusCode);
+        }
+
+        using var lockedResp = await client.PostAsJsonAsync("/api/auth/login", new
+        {
+            UserName = targetUser,
+            Password = password
+        });
+        Assert.Equal(HttpStatusCode.Unauthorized, lockedResp.StatusCode);
+
+        using var bobClient = await factory.LoginAsync("bob", password);
+        using var meResp = await bobClient.GetAsync("/api/me");
+        Assert.Equal(HttpStatusCode.OK, meResp.StatusCode);
+    }
 }

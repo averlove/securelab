@@ -1,3 +1,4 @@
+using SecureLab.Api.Security;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Identity;
 using SecureLab.Api.Data;
@@ -28,6 +29,9 @@ public static class Lab03Identity
         {
             options.User.RequireUniqueEmail = true;
             options.Password.RequiredLength = 10;
+            options.Lockout.AllowedForNewUsers = true;
+            options.Lockout.MaxFailedAccessAttempts = 5;
+            options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(5);
         }).AddEntityFrameworkStores<SecureLabDbContext>().AddDefaultTokenProviders();
 
         builder.Services.AddAuthorization();
@@ -110,7 +114,7 @@ public static class Lab03Identity
                 return Results.Unauthorized();
             }
 
-            var result = await signIn.PasswordSignInAsync(input.UserName, input.Password, isPersistent: false, lockoutOnFailure: false);
+            var result = await signIn.PasswordSignInAsync(input.UserName, input.Password, isPersistent: false, lockoutOnFailure: true);
             return result.Succeeded ? Results.NoContent() : Results.Unauthorized();
         });
 
@@ -119,7 +123,7 @@ public static class Lab03Identity
         {
             await signIn.SignOutAsync();
             return Results.NoContent();
-        }).RequireAuthorization();
+        }).RequireAuthorization().AddEndpointFilter<AntiforgeryFilter>();
 
         // 4. GET /api/me (Verified Principal)
         app.MapGet("/api/me", GetCurrentUser).RequireAuthorization();
