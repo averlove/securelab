@@ -84,6 +84,7 @@ public sealed class Lab04AuthorizationTests : IClassFixture<SecureLabApiFactory>
     public async Task A04_OtherReporter_CannotMutateOtherIncident_DbUnchanged()
     {
         using var alice = await LoginAsAsync("alice");
+        await AddCsrfHeaderAsync(alice);
 
         string originalTitle;
         using (var scope = _factory.Services.CreateScope())
@@ -136,6 +137,7 @@ public sealed class Lab04AuthorizationTests : IClassFixture<SecureLabApiFactory>
     public async Task A06_Reporter_CannotTriageOwnIncident_Returns403()
     {
         using var alice = await LoginAsAsync("alice");
+        await AddCsrfHeaderAsync(alice);
 
         var response = await alice.PostAsync($"/api/incidents/{AliceIncident1Id}/triage", content: null);
 
@@ -147,6 +149,7 @@ public sealed class Lab04AuthorizationTests : IClassFixture<SecureLabApiFactory>
     public async Task A07_Analyst_CanTriageNewIncident_AndRejectsInvalidTransition()
     {
         using var morgan = await LoginAsAsync("morgan");
+        await AddCsrfHeaderAsync(morgan);
 
         // Створюємо свіжий інцидент у стані New для ізольованої перевірки переходу
         var createResp = await morgan.PostAsJsonAsync("/api/incidents", new
@@ -172,6 +175,7 @@ public sealed class Lab04AuthorizationTests : IClassFixture<SecureLabApiFactory>
     public async Task A08_ServerManagedFields_CannotBeSpoofedByClient()
     {
         using var alice = await LoginAsAsync("alice");
+        await AddCsrfHeaderAsync(alice);
 
         // A-08a: Спроба підмінити ownerUserId на BobId і status на Closed при POST
         var createResp = await alice.PostAsJsonAsync("/api/incidents", new
@@ -229,10 +233,12 @@ public sealed class Lab04AuthorizationTests : IClassFixture<SecureLabApiFactory>
             });
         });
 
-        var client = customFactory.CreateClient();
+        using var client = customFactory.CreateClient();
         var password = Environment.GetEnvironmentVariable("SeedUsers__Password") ?? "Pa$$w0rD$ecure1";
         var loginResp = await client.PostAsJsonAsync("/api/auth/login", new { userName = "alice", password });
         loginResp.EnsureSuccessStatusCode();
+
+        await AddCsrfHeaderAsync(client);
 
         var triageResp = await client.PostAsync($"/api/incidents/{AliceIncident1Id}/triage", content: null);
         Assert.Equal(HttpStatusCode.Forbidden, triageResp.StatusCode);
@@ -324,6 +330,23 @@ public sealed class Lab04AuthorizationTests : IClassFixture<SecureLabApiFactory>
         response.EnsureSuccessStatusCode();
         return client;
     }
+
+    private static async Task AddCsrfHeaderAsync(HttpClient client)
+    {
+        using var tokenResponse = await client.GetAsync("/api/csrf-token");
+        tokenResponse.EnsureSuccessStatusCode();
+
+        var payload = await tokenResponse.Content.ReadFromJsonAsync<CsrfTokenPayload>();
+        if (string.IsNullOrWhiteSpace(payload?.Token))
+        {
+            throw new InvalidOperationException("CSRF token was not returned by /api/csrf-token.");
+        }
+
+        client.DefaultRequestHeaders.Remove("X-SecureLab-CSRF");
+        client.DefaultRequestHeaders.Add("X-SecureLab-CSRF", payload.Token);
+    }
+
+    private sealed record CsrfTokenPayload(string Token);
 
     private sealed class InMemoryAuditLoggerProvider(List<string> sink) : ILoggerProvider
     {

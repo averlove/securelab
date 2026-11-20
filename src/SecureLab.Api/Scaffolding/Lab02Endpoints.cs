@@ -1,3 +1,4 @@
+using SecureLab.Api.Security;
 using Microsoft.EntityFrameworkCore;
 using SecureLab.Api.Data;
 using SecureLab.Api.Data.Entities;
@@ -79,7 +80,7 @@ public static class Lab02Endpoints
                 .ToListAsync(ct);
 
             return Results.Ok(items);
-        }).RequireAuthorization(); // ЛР 04 (А-11): Додано захист від анонімного доступу
+        }).RequireAuthorization().RequireRateLimiting("search-per-user"); // ЛР 04 (А-11): Додано захист від анонімного доступу
 
         // =========================================================================
         // POST /api/incidents (Успадковано з ЛР 03)
@@ -194,7 +195,7 @@ public static class Lab02Endpoints
             );
 
             return Results.Created($"/api/incidents/{incident.Id}", response);
-        }).RequireAuthorization();
+        }).RequireAuthorization().AddEndpointFilter<AntiforgeryFilter>();
     }
 
     private static string EscapeLike(string value)
