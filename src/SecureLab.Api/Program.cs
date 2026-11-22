@@ -1,15 +1,15 @@
-using StackExchange.Redis;
-using SecureLab.Api.Security;
+using System.Globalization;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Scalar.AspNetCore;
 using SecureLab.Api.Application.Incidents;
 using SecureLab.Api.Data;
 using SecureLab.Api.Presentation.Endpoints;
 using SecureLab.Api.Scaffolding;
+using SecureLab.Api.Security;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(new WebApplicationOptions
 {
@@ -51,6 +51,15 @@ if (builder.Environment.IsDevelopment())
 
 var globalPermitLimit = builder.Configuration.GetValue("RateLimiting:GlobalPermitLimit", 5);
 var searchPermitLimit = builder.Configuration.GetValue("RateLimiting:SearchPermitLimit", 10);
+var searchWindowSeconds = builder.Configuration.GetValue("RateLimiting:SearchWindowSeconds", 30);
+
+var searchRateLimitOptions = new SearchRateLimitOptions
+{
+    PermitLimit = searchPermitLimit,
+    Window = TimeSpan.FromSeconds(searchWindowSeconds),
+    KeyPrefix = builder.Configuration["RateLimiting:SearchKeyPrefix"] ?? "search:"
+};
+builder.Services.AddSingleton(searchRateLimitOptions);
 
 var redisConnStr = builder.Configuration["Redis:ConnectionString"];
 IConnectionMultiplexer? redisMultiplexer = null;
@@ -58,16 +67,15 @@ if (!string.IsNullOrWhiteSpace(redisConnStr))
 {
     var cfg = ConfigurationOptions.Parse(redisConnStr);
     cfg.AbortOnConnectFail = false;
-    cfg.ConnectTimeout = 1000;
-    cfg.SyncTimeout = 1000;
+    cfg.ConnectTimeout = 500;
+    cfg.AsyncTimeout = 200;
     redisMultiplexer = ConnectionMultiplexer.Connect(cfg);
 }
 
 builder.Services.AddSingleton(sp => new RedisSearchRateLimiter(
     redisMultiplexer,
     sp.GetRequiredService<ILogger<RedisSearchRateLimiter>>(),
-    searchPermitLimit,
-    windowSeconds: 30));
+    sp.GetRequiredService<SearchRateLimitOptions>()));
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -89,8 +97,8 @@ builder.Services.AddRateLimiter(options =>
             factory: _ => new FixedWindowRateLimiterOptions
             {
                 AutoReplenishment = true,
-                PermitLimit = searchPermitLimit,
-                Window = TimeSpan.FromSeconds(30),
+                PermitLimit = searchRateLimitOptions.PermitLimit,
+                Window = searchRateLimitOptions.Window,
                 QueueLimit = 0
             }));
 });
@@ -158,10 +166,11 @@ app.Use(async (context, next) =>
         {
             var partitionKey = context.User.Identity?.Name ?? "anonymous";
             var decision = await redisLimiter.TryAcquireAsync(partitionKey);
-            if (decision == false)
+            if (!decision.Allowed)
             {
+                var retryAfterSeconds = Math.Max(1, decision.RetryAfterSeconds);
                 context.Response.StatusCode = StatusCodes.Status429TooManyRequests;
-                context.Response.Headers.RetryAfter = "30";
+                context.Response.Headers.RetryAfter = retryAfterSeconds.ToString(CultureInfo.InvariantCulture);
                 await Results.Problem(
                     title: "Too Many Requests",
                     detail: "Distributed search rate limit exceeded.",
