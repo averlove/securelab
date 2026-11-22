@@ -132,16 +132,30 @@ public sealed class Lab04AuthorizationTests : IClassFixture<SecureLabApiFactory>
         Assert.Contains(morganItems, i => i.Id == BobIncident2Id);
     }
 
-    // A-06: Reporter не може виконати привілейовану операцію triage -> 403 Forbidden
+    // A-06: Reporter не може виконати привілейовану операцію triage -> 403 Forbidden (стан у БД не змінюється)
     [Fact]
     public async Task A06_Reporter_CannotTriageOwnIncident_Returns403()
     {
         using var alice = await LoginAsAsync("alice");
         await AddCsrfHeaderAsync(alice);
 
+        IncidentStatus originalStatus;
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<SecureLabDbContext>();
+            originalStatus = (await db.Incidents.AsNoTracking().SingleAsync(i => i.Id == AliceIncident1Id)).Status;
+        }
+
         var response = await alice.PostAsync($"/api/incidents/{AliceIncident1Id}/triage", content: null);
 
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+
+        using (var scope = _factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<SecureLabDbContext>();
+            var afterStatus = (await db.Incidents.AsNoTracking().SingleAsync(i => i.Id == AliceIncident1Id)).Status;
+            Assert.Equal(originalStatus, afterStatus);
+        }
     }
 
     // A-07: Analyst може виконати triage (New -> Triaged), повторний виклик -> 409 Conflict

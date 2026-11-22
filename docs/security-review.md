@@ -8,7 +8,7 @@
 - усунено критичну прогалину на межі `browser -> API` (**F-01**): впроваджено стандартний механізм antiforgery (`IAntiforgery` + `AntiforgeryFilter` із заголовком `X-SecureLab-CSRF` та маршрутом `GET /api/csrf-token`) на всіх cookie-authenticated змінювальних маршрутах і перевірено автоматизованим тестом `REG-CSRF-01`;
 - посилено захист від зловживань (**F-02**): додано user-scoped rate limiting (`search-per-user`) на пошуковий ендпоїнт `/api/incidents` у доповнення до глобального лімітера;
 - перевірено коректність ізоляції середовища `Production` (заборона `--reset-database`, приховування stack trace за `ProblemDetails` із `traceId`), виконано аудит залежностей NuGet (`0` відомих вразливостей у `api.nuget.org` станом на `2026-11-20`), систематичний пошук секретів у `tracked files` (142 збіги за розширеним патерном, реальних продакшн-секретів не виявлено) та перевірено відсутність паролів, cookies і CSRF-токенів у журналах (`0` збігів);
-- фінальний регресійний набір у конфігурації `Release` (`dotnet test SecureLab.sln -c Release`) після скидання БД пройшов успішно: **23 з 23 тестів (`Failed: 0`)**.
+- фінальний регресійний набір у конфігурації `Release` (`dotnet test SecureLab.sln -c Release`) після скидання БД пройшов успішно: **24 з 24 тестів (`Failed: 0`)**.
 
 ## 2. Scope та exclusions
 - **У межах огляду (In scope):**
@@ -107,7 +107,33 @@ environment configuration --> [ API startup ] --> runtime configuration
 
 ## 7. Regression results
 
+Регресійне тестування виконано у конфігурації `Release` після повного перестворення бази даних (`--reset-database`) та перевірки роботи розподіленого сховища Redis:
+
+- **Команда прогону:** `dotnet test SecureLab.sln -c Release`
+- **Результат:** `Всего: 24; Сбой: 0; Успешно: 24; Пропущено: 0` (включно з регресійними тестами ЛР 1–6 та інтеграційними тестами розподіленого rate limiter із живим Redis та fallback-режимом).
+
+| ID перевірки / Сценарій | Тестовий клас / Артефакт | Межа довіри | Перевірена властивість та спостереження | Статус |
+| :--- | :--- | :--- | :--- | :---: |
+| **REG-SQLI-01 (S-02)** | `SearchMechanicsTests` | `API -> PostgreSQL` | Параметризований пошук за `q` відхиляє SQL-ін'єкції та коректно фільтрує вибірку. | **Passed** |
+| **REG-AUTH-01** | `AuthenticationMechanicsTests` | `browser -> API` | Валідація сесій (`StudyClock`), коректна відмова `401` при невалідних credentials. | **Passed** |
+| **REG-AUTHZ-01 (A-01..A-12)** | `Lab04AuthorizationTests` | `browser -> API` | Ізоляція ресурсів за власником і роллю (`404` для чужих записів, `403` при спробі `Reporter` виконати `triage` із підтвердженням незмінності `Status` у БД). | **Passed** |
+| **REG-XSS-01 / REG-CORS-01** | `browser-security-evidence.md` (`description-dom.js`, `comments-dom.js`) | `browser -> API` | Екранування DOM через `createTextNode`/`replaceChildren`, блокування стороннього `Origin` (`4174`). | **Passed** |
+| **REG-CSRF-01** | `CsrfRegressionTests.Csrf_WithoutToken_IsRejected_StateUnchanged_ThenValidPairSucceeds` | `browser -> API` | Запит `PUT /api/incidents/{id}` без `X-SecureLab-CSRF` -> `400 Bad Request` (`state == before`); з валідним токеном із `GET /api/csrf-token` -> `204 No Content` і оновлення стану. | **Passed** |
+| **REG-RL-01 (R-01, Redis)** | `RedisSearchRateLimiter` + ручні/автоматизовані тести (`5080`/`5081`) | `browser -> API` | Спільний ліміт між інстансами (11-й запит -> `429`), fail-safe перехід на локальний лімітер при простої/холодному старті Redis (`warn` 1 раз) та автоматичне відновлення (`info`). | **Passed** |
+
 ## 8. Hardening controls
+
+У межах посилення захищеності застосунку `SecureLab.Api` впроваджено та верифіковано такі технічні контролі:
+
+| Контроль | Реалізація у коді / конфігурації | Межа довіри | Призначення та ефект |
+| :--- | :--- | :--- | :--- |
+| **CSRF Protection (Anti-Forgery)** | `AddAntiforgery` (`X-SecureLab-CSRF`), `GET /api/csrf-token`, `AntiforgeryFilter`, `csrf-helper.js` | `browser -> API` | Захист усіх cookie-authenticated state-changing маршрутів (`POST`, `PUT`, `DELETE`, `triage`, коментарі, `logout`) від міжсайтової підробки запитів. |
+| **Per-User & Distributed Rate Limiting** | Політика `search-per-user` у `Program.cs`, `RedisSearchRateLimiter` (атомарний Lua-скрипт + `PEXPIRE` + local fail-safe fallback) | `browser -> API` | Обмеження частоти пошукових запитів на рівні користувача між кількома інстансами (`5080`/`5081`) зі збереженням локального захисту при відмові Redis. |
+| **Security Headers & CSP** | Middleware заголовків безпеки у `Program.cs` (`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `CSP: default-src 'self'; frame-ancestors 'none'`) | `browser -> API` | Заборона MIME-sniffing, витоку `Referer` та clickjacking-вбудовування у сторонні `iframe`. |
+| **Production Environment Isolation** | `Database:AllowReset=false` у `appsettings.json`, заборона `--reset-database` у середовищі `Production` | `environment -> configuration` | Унеможливлення випадкового або несанкціонованого скидання виробничої бази даних. |
+| **Safe Error Handling (`ProblemDetails`)** | `AddProblemDetails()` + `UseExceptionHandler()` із генерацією `traceId` без stack trace у відповіді | `environment -> configuration` | Запобігання витоку внутрішньої структури коду, SQL-запитів та рядків підключення у HTTP-відповідях `4xx`/`5xx`. |
+| **Structured Security Audit Logging** | Події `SecurityAudit` у `IncidentEndpoints.cs` та `Lab03Identity.cs` без запису паролів, cookies і CSRF-токенів | `API -> PostgreSQL` / `Ops` | Фіксація критичних відмов і привілейованих переходів (`Triage`) для розслідування інцидентів без компрометації секретів у логах. |
+| **Supply Chain & Lockfile Integrity** | `RestorePackagesWithLockFile=true` (`packages.lock.json`), перевірка `dotnet package list --vulnerable --include-transitive` | `repository -> build` | Фіксація графу залежностей та контроль відсутності відомих вразливостей у прямих і транзитивних NuGet-пакетах. |
 
 ## 9. Dependency and secret audit
 
